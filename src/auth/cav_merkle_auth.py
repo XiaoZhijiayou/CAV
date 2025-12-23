@@ -177,6 +177,26 @@ class CAVMerkleAuth:
             out[lname] = sha256(payload)
         return out
 
+    def param_hashes(self, model: nn.Module) -> Dict[str, str]:
+        out: Dict[str, str] = {}
+        for name, p in model.named_parameters():
+            t = p.detach().cpu().contiguous()
+            dtype = str(t.dtype).encode("utf-8")
+            shape = ",".join(str(x) for x in t.shape).encode("utf-8")
+            payload = (
+                self.k_merkle
+                + b"|PARAM|"
+                + name.encode("utf-8")
+                + b"|"
+                + dtype
+                + b"|"
+                + shape
+                + b"|"
+                + t.view(torch.uint8).numpy().tobytes()
+            )
+            out[name] = sha256(payload).hex()
+        return out
+
     def merkle_root(self, hashes: List[bytes]) -> bytes:
         if len(hashes) == 0:
             return sha256(self.k_merkle + b"|EMPTY")
@@ -433,6 +453,8 @@ class CAVMerkleAuth:
         if embedded < len(bits):
             raise RuntimeError(f"Carrier capacity insufficient: need {len(bits)} bits, embedded {embedded} bits")
 
+        param_hashes = self.param_hashes(model)
+
         cfg_info = {
             "probe_n": self.cfg.probe_n,
             "probe_shape": list(self.cfg.probe_shape),
@@ -460,6 +482,7 @@ class CAVMerkleAuth:
             "cfg_hash_hex": cfg_hash.hex(),
             "fp_layers": fp_layers,
             "layer_hashes": layer_hashes_hex,
+            "param_hashes": param_hashes,
             "carrier_params": carrier_names,
             "carrier_caps": carrier_caps,
             "payload_bits": len(payload_bits),
@@ -521,6 +544,18 @@ class CAVMerkleAuth:
 
         mism_layers = [k for k, v in calc_layer_hash.items() if (k in ref_layer_hash and v != ref_layer_hash[k])]
 
+        mism_params: List[str] = []
+        missing_params: List[str] = []
+        extra_params: List[str] = []
+        ref_param_hash = meta.get("param_hashes")
+        if isinstance(ref_param_hash, dict):
+            calc_param_hash = self.param_hashes(model)
+            for name, h in calc_param_hash.items():
+                if name in ref_param_hash and h != ref_param_hash[name]:
+                    mism_params.append(name)
+            missing_params = [k for k in ref_param_hash.keys() if k not in calc_param_hash]
+            extra_params = [k for k in calc_param_hash.keys() if k not in ref_param_hash]
+
         return {
             "ok": ok,
             "hamming_root": d,
@@ -534,6 +569,10 @@ class CAVMerkleAuth:
             "cfg_hash_ok": cfg_hash_ok,
             "mism_layers": mism_layers,
             "layer_mismatch_count": len(mism_layers),
+            "mism_params": mism_params,
+            "param_mismatch_count": len(mism_params),
+            "missing_params": missing_params,
+            "extra_params": extra_params,
         }
 
     @staticmethod
