@@ -1,0 +1,5 @@
+/data
+/checkpoints
+/__pycache__
+/src/utils/__pycache__
+/src/auth/__pycache__
