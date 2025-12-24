@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import logging
 import json
 from pathlib import Path
 import torch
@@ -33,14 +34,23 @@ def parse_args():
     p.add_argument("--max_floats_per_param", type=int, default=4096)
     p.add_argument("--ecc_scheme", type=str, default="hamming1511", choices=["hamming1511", "none"])
     p.add_argument("--device", type=str, default="cuda" if torch.cuda.is_available() else "cpu")
+    p.add_argument("--verbose", action="store_true")
     return p.parse_args()
 
 def main():
     args = parse_args()
+    logging.basicConfig(
+        level=logging.INFO if args.verbose else logging.WARNING,
+        format="[%(levelname)s] %(message)s",
+    )
+    logger = logging.getLogger(__name__)
     key = load_key_bytes(args.key_hex or None, args.key_file or None, args.key_env)
     key_id = args.key_id or key_id_from_key(key)
+    logger.info("embed_auth: ckpt=%s out=%s meta_out=%s", args.ckpt, args.out, args.meta_out or "<auto>")
+    logger.info("embed_auth: key_id=%s device=%s", key_id, args.device)
     ck = load_checkpoint(args.ckpt, map_location="cpu")
     cfg = ck["cfg"]
+    logger.info("model: name=%s num_classes=%s in_ch=%s", cfg.get("model"), cfg.get("num_classes"), cfg.get("in_ch"))
     model = build_model(cfg["model"], num_classes=cfg["num_classes"], in_ch=cfg["in_ch"])
     model.load_state_dict(ck["model_state"], strict=True)
 
@@ -68,6 +78,9 @@ def main():
             raise ValueError("--privkey is required for signing unless --no_sign is set.")
         meta["signature_alg"] = "ed25519"
         meta["signature"] = sign_meta_ed25519(meta, args.privkey)
+        logger.info("signature: enabled=True alg=ed25519")
+    else:
+        logger.info("signature: enabled=False")
 
     out_path = Path(args.out)
     out_path.parent.mkdir(parents=True, exist_ok=True)

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse, json
+import logging
 from pathlib import Path
 import torch
 
@@ -18,10 +19,16 @@ def parse_args():
     p.add_argument("--pubkey", type=str, default="")
     p.add_argument("--allow_unsigned", action="store_true")
     p.add_argument("--device", type=str, default="cuda" if torch.cuda.is_available() else "cpu")
+    p.add_argument("--verbose", action="store_true")
     return p.parse_args()
 
 def main():
     args = parse_args()
+    logging.basicConfig(
+        level=logging.INFO if args.verbose else logging.WARNING,
+        format="[%(levelname)s] %(message)s",
+    )
+    logger = logging.getLogger(__name__)
     pack = torch.load(args.ckpt, map_location="cpu")
     cfg = pack["cfg"]
     model = build_model(cfg["model"], num_classes=cfg["num_classes"], in_ch=cfg["in_ch"])
@@ -35,8 +42,11 @@ def main():
         if not args.pubkey:
             raise ValueError("--pubkey is required to verify signature.")
         sig_ok = verify_meta_ed25519(meta, meta["signature"], args.pubkey)
+        logger.info("signature: present=True verified=%s alg=%s", sig_ok, meta.get("signature_alg"))
     elif "signature" not in meta and not args.allow_unsigned:
         raise ValueError("Missing signature. Use --allow_unsigned to bypass verification.")
+    else:
+        logger.info("signature: present=%s allow_unsigned=%s", "signature" in meta, args.allow_unsigned)
 
     acfg = CAVMerkleAuth.cfg_from_meta(meta, key=key, device=args.device)
     auth = CAVMerkleAuth(acfg)

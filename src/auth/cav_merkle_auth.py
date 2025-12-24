@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import logging
 import json
 from typing import Dict, List, Tuple, Optional
 
@@ -13,6 +14,8 @@ from ..utils.misc import sha256, to_bits, bits_to_bytes, hamming
 
 HAMMING_DATA_POS_1511 = [3, 5, 6, 7, 9, 10, 11, 12, 13, 14, 15]
 HAMMING_PARITY_POS_1511 = [1, 2, 4, 8]
+
+logger = logging.getLogger(__name__)
 
 @dataclass
 class CAVConfig:
@@ -440,20 +443,34 @@ class CAVMerkleAuth:
     @torch.no_grad()
     def embed(self, model: nn.Module, in_ch: int) -> Dict[str, object]:
         model = model.to(self.cfg.device).eval()
+        def _fmt_list(items: List[str], max_items: int = 20) -> str:
+            if len(items) <= max_items:
+                return "[" + ", ".join(items) + "]"
+            head = ", ".join(items[:max_items])
+            return f"[{head}, ... +{len(items) - max_items} more]"
+
+        logger.info("embed: start in_ch=%s device=%s", in_ch, self.cfg.device)
         root, layer_hashes_hex, fp_layers = self.compute_root(model, in_ch=in_ch)
         cfg_hash = self._cfg_hash_bytes(fp_layers)
+        logger.info("embed: root_hex=%s cfg_hash_hex=%s fp_layers=%d", root.hex(), cfg_hash.hex(), len(fp_layers))
         payload_bits = self._build_payload_bits(root, cfg_hash)
         bits, ecc_meta = self._ecc_encode(payload_bits)
+        logger.info("embed: payload_bits=%d encoded_bits=%d ecc=%s", len(payload_bits), len(bits), ecc_meta)
 
         carriers = self._select_carrier_params(model)
         carrier_names = [n for n, _ in carriers]
         carrier_caps = self._carrier_caps(carriers)
         mapping = self._build_embed_mapping(carrier_names, carrier_caps)
+        logger.info("carriers: names=%s", _fmt_list(carrier_names))
+        logger.info("carriers: caps=%s", carrier_caps)
+        logger.info("mapping: capacity_bits=%d", len(mapping))
         embedded = self._embed_bits_carriers(carriers, mapping, bits)
         if embedded < len(bits):
             raise RuntimeError(f"Carrier capacity insufficient: need {len(bits)} bits, embedded {embedded} bits")
+        logger.info("embed: embedded_bits=%d", embedded)
 
         param_hashes = self.param_hashes(model)
+        logger.info("param_hashes: count=%d", len(param_hashes))
 
         cfg_info = {
             "probe_n": self.cfg.probe_n,
@@ -503,12 +520,27 @@ class CAVMerkleAuth:
         carrier_names = list(meta["carrier_params"])
         carrier_caps_ref = list(meta.get("carrier_caps", []))
 
+        def _fmt_list(items: List[str], max_items: int = 20) -> str:
+            if len(items) <= max_items:
+                return "[" + ", ".join(items) + "]"
+            head = ", ".join(items[:max_items])
+            return f"[{head}, ... +{len(items) - max_items} more]"
+
+        logger.info("verify: start in_ch=%s device=%s", in_ch, self.cfg.device)
+        logger.info("meta: fp_layers=%d carrier_params=%d payload_bits=%d encoded_bits=%d", len(fp_layers), len(carrier_names), payload_bits, encoded_bits)
+        logger.info("meta: carrier_params=%s", _fmt_list(carrier_names))
+        logger.info("meta: carrier_caps_ref=%s", carrier_caps_ref)
+        logger.info("meta: root_ref_hex=%s cfg_hash_hex=%s", root_ref_hex, meta.get("cfg_hash_hex"))
+
         calc_root, calc_layer_hash, _ = self.compute_root(model, in_ch=in_ch, fp_layers=fp_layers)
+        logger.info("calc: root_hex=%s", calc_root.hex())
 
         carriers = self._carriers_from_names(model, carrier_names)
         carrier_caps = self._carrier_caps(carriers)
         mapping = self._build_embed_mapping(carrier_names, carrier_caps)
         capacity_ok = encoded_bits <= len(mapping)
+        logger.info("mapping: capacity_bits=%d capacity_ok=%s", len(mapping), capacity_ok)
+        logger.info("mapping: carrier_caps=%s", carrier_caps)
         if not capacity_ok:
             return {
                 "ok": False,
@@ -519,6 +551,7 @@ class CAVMerkleAuth:
             }
         bits = self._extract_bits_carriers(carriers, mapping, encoded_bits)
         data_bits, ecc_stats = self._ecc_decode(bits, payload_bits)
+        logger.info("ecc: %s", ecc_stats)
 
         header = data_bits[:32]
         cfg_hash_bits = data_bits[32:64]
@@ -541,8 +574,10 @@ class CAVMerkleAuth:
         cfg_hash_ok = cfg_hash_bits == to_bits(self._cfg_hash_bytes(fp_layers))
         d = hamming(to_bits(calc_root), to_bits(emb_root))
         ok = (d <= self.cfg.ham_thr) and header_ok and cfg_hash_ok
+        logger.info("check: header_ok=%s cfg_hash_ok=%s hamming_root=%d ham_thr=%d ok=%s", header_ok, cfg_hash_ok, d, self.cfg.ham_thr, ok)
 
         mism_layers = [k for k, v in calc_layer_hash.items() if (k in ref_layer_hash and v != ref_layer_hash[k])]
+        logger.info("layer: mism_layers=%d %s", len(mism_layers), _fmt_list(mism_layers))
 
         mism_params: List[str] = []
         missing_params: List[str] = []
@@ -555,6 +590,9 @@ class CAVMerkleAuth:
                     mism_params.append(name)
             missing_params = [k for k in ref_param_hash.keys() if k not in calc_param_hash]
             extra_params = [k for k in calc_param_hash.keys() if k not in ref_param_hash]
+            logger.info("param: mism_params=%d %s", len(mism_params), _fmt_list(mism_params))
+            logger.info("param: missing_params=%d %s", len(missing_params), _fmt_list(missing_params))
+            logger.info("param: extra_params=%d %s", len(extra_params), _fmt_list(extra_params))
 
         return {
             "ok": ok,
