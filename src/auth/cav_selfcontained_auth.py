@@ -237,74 +237,120 @@ class CAVSelfContainedAuth:
         }
         return cfg, root, meta
 
-    def _select_carrier(self, model: nn.Module) -> Tuple[str, torch.Tensor]:
+    def _select_carriers(self, model: nn.Module) -> List[Tuple[str, torch.Tensor]]:
         named = dict(model.named_parameters())
+        carriers: List[Tuple[str, torch.Tensor]] = []
+        used = set()
         for name in self.cfg.embed_param_names:
             if name in named and named[name].dtype == torch.float32:
-                return name, named[name]
-        for name, p in model.named_parameters():
+                carriers.append((name, named[name]))
+                used.add(name)
+        for name in sorted(named.keys()):
+            if name in used:
+                continue
+            p = named[name]
             if p.dtype == torch.float32:
-                return name, p
-        raise RuntimeError("No float32 parameters found for embedding.")
+                carriers.append((name, p))
+        if not carriers:
+            raise RuntimeError("No float32 parameters found for embedding.")
+        return carriers
 
-    def _embed_bits_tensor(self, tensor: torch.Tensor, bits: List[int]) -> Tuple[int, int]:
-        arr = tensor.detach().cpu().contiguous().view(torch.uint8).numpy()
-        u32 = arr.view(np.uint32)
-        cap = min(u32.size, self.cfg.max_floats_per_param)
-        max_bits = cap * self.cfg.lsb_bits
-        m = min(len(bits), max_bits)
+    def _carrier_caps(self, carriers: List[Tuple[str, torch.Tensor]]) -> List[int]:
+        caps = []
+        for _name, p in carriers:
+            caps.append(min(p.numel(), self.cfg.max_floats_per_param))
+        return caps
+
+    def _build_mapping(self, carrier_names: List[str], carrier_caps: List[int]) -> List[Tuple[int, int, int]]:
+        mapping: List[Tuple[int, int, int]] = []
+        for pi, cap in enumerate(carrier_caps):
+            for off in range(cap):
+                for bi in range(self.cfg.lsb_bits):
+                    mapping.append((pi, off, bi))
+        seed_payload = "|".join(carrier_names).encode("utf-8") + b"|" + ",".join(str(c) for c in carrier_caps).encode("utf-8")
+        seed = int.from_bytes(sha256(self.cfg.key + b"|MAP|" + seed_payload)[:8], "big")
+        rng = np.random.default_rng(seed)
+        rng.shuffle(mapping)
+        return mapping
+
+    def _embed_bits_carriers(
+        self,
+        carriers: List[Tuple[str, torch.Tensor]],
+        mapping: List[Tuple[int, int, int]],
+        bits: List[int],
+    ) -> int:
+        arrays = []
+        for _name, tensor in carriers:
+            arr = tensor.detach().cpu().contiguous().view(torch.uint8).numpy()
+            u32 = arr.view(np.uint32)
+            arrays.append((arr, u32))
+        m = min(len(bits), len(mapping))
         for i in range(m):
-            off = i // self.cfg.lsb_bits
-            bi = i % self.cfg.lsb_bits
+            pi, off, bi = mapping[i]
+            u32 = arrays[pi][1]
             mask = 1 << bi
             if bits[i] == 1:
                 u32[off] |= mask
             else:
                 u32[off] &= ~mask
-        arr[:] = u32.view(np.uint8)
-        tensor.data.copy_(torch.from_numpy(arr).view_as(tensor))
-        return m, max_bits
+        for (_name, tensor), (arr, u32) in zip(carriers, arrays):
+            arr[:] = u32.view(np.uint8)
+            tensor.data.copy_(torch.from_numpy(arr).view_as(tensor))
+        return m
 
-    def _extract_bits_tensor(self, tensor: torch.Tensor, nbits: int) -> Tuple[List[int], int]:
-        arr = tensor.detach().cpu().contiguous().view(torch.uint8).numpy()
-        u32 = arr.view(np.uint32)
-        cap = min(u32.size, self.cfg.max_floats_per_param)
-        max_bits = cap * self.cfg.lsb_bits
-        m = min(nbits, max_bits)
+    def _extract_bits_carriers(
+        self,
+        carriers: List[Tuple[str, torch.Tensor]],
+        mapping: List[Tuple[int, int, int]],
+        nbits: int,
+    ) -> List[int]:
+        arrays = []
+        for _name, tensor in carriers:
+            arr = tensor.detach().cpu().contiguous().view(torch.uint8).numpy()
+            u32 = arr.view(np.uint32)
+            arrays.append(u32)
+        m = min(nbits, len(mapping))
         out = []
         for i in range(m):
-            off = i // self.cfg.lsb_bits
-            bi = i % self.cfg.lsb_bits
-            out.append(int((u32[off] >> bi) & 1))
-        return out, max_bits
+            pi, off, bi = mapping[i]
+            out.append(int((arrays[pi][off] >> bi) & 1))
+        return out
 
     def embed_inplace(self, model: nn.Module, in_ch: int) -> Dict[str, object]:
         model = model.to(self.cfg.device).eval()
         root = self.compute_root(model, in_ch=in_ch)
         payload = self.pack_payload(root, in_ch=in_ch)
         bits = to_bits(payload)
-        carrier_name, carrier_tensor = self._select_carrier(model)
-        embedded, capacity = self._embed_bits_tensor(carrier_tensor, bits)
+        carriers = self._select_carriers(model)
+        carrier_names = [n for n, _ in carriers]
+        carrier_caps = self._carrier_caps(carriers)
+        mapping = self._build_mapping(carrier_names, carrier_caps)
+        embedded = self._embed_bits_carriers(carriers, mapping, bits)
+        capacity = len(mapping)
         if embedded < len(bits):
             raise RuntimeError(f"Carrier capacity insufficient: need {len(bits)} bits, embedded {embedded} bits")
         return {
             "root_hex": root.hex(),
-            "carrier_param": carrier_name,
+            "carrier_params": carrier_names,
             "payload_bits": len(bits),
             "capacity_bits": capacity,
         }
 
     def verify(self, model: nn.Module, in_ch: int) -> Dict[str, object]:
         model = model.to(self.cfg.device).eval()
-        carrier_name, carrier_tensor = self._select_carrier(model)
-        bits, capacity = self._extract_bits_tensor(carrier_tensor, PAYLOAD_LEN * 8)
-        if len(bits) < PAYLOAD_LEN * 8:
+        carriers = self._select_carriers(model)
+        carrier_names = [n for n, _ in carriers]
+        carrier_caps = self._carrier_caps(carriers)
+        mapping = self._build_mapping(carrier_names, carrier_caps)
+        capacity = len(mapping)
+        if capacity < PAYLOAD_LEN * 8:
             return {
                 "ok": False,
                 "error": "carrier capacity insufficient for payload",
                 "capacity_bits": capacity,
-                "carrier_param": carrier_name,
+                "carrier_params": carrier_names,
             }
+        bits = self._extract_bits_carriers(carriers, mapping, PAYLOAD_LEN * 8)
         payload = bits_to_bytes(bits[: PAYLOAD_LEN * 8])
         cfg2, root_emb, meta = self.unpack_payload(payload)
         auth2 = CAVSelfContainedAuth(cfg2)
@@ -314,7 +360,7 @@ class CAVSelfContainedAuth:
             return {
                 "ok": False,
                 "error": str(e),
-                "carrier_param": carrier_name,
+                "carrier_params": carrier_names,
                 "magic_ok": meta["magic_ok"],
                 "crc_ok": meta["crc_ok"],
             }
@@ -326,6 +372,6 @@ class CAVSelfContainedAuth:
             "version": meta["version"],
             "root_emb_hex": root_emb.hex(),
             "root_calc_hex": root_calc.hex(),
-            "carrier_param": carrier_name,
+            "carrier_params": carrier_names,
             "capacity_bits": capacity,
         }

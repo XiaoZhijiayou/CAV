@@ -38,7 +38,8 @@ def main():
     scfg = SCConfig(key=key, device=args.device)
     auth = CAVSelfContainedAuth(scfg)
     res = auth.verify(model, in_ch=cfg["in_ch"])
-    logger.info("carrier=%s capacity_bits=%s", res.get("carrier_param"), res.get("capacity_bits"))
+    if "carrier_params" in res:
+        logger.info("carriers=%d capacity_bits=%s", len(res["carrier_params"]), res.get("capacity_bits"))
     print("PASS" if res.get("ok") else "FAIL")
     print(json.dumps(res, indent=2))
 

@@ -63,7 +63,7 @@ def main():
     }, str(out_path))
 
     logger.info("embedded: root_hex=%s", info["root_hex"])
-    logger.info("embedded: carrier=%s payload_bits=%d capacity_bits=%d", info["carrier_param"], info["payload_bits"], info["capacity_bits"])
+    logger.info("embedded: carriers=%d payload_bits=%d capacity_bits=%d", len(info["carrier_params"]), info["payload_bits"], info["capacity_bits"])
     print(f"[OK] saved self-contained auth model to: {out_path}")
 
 
