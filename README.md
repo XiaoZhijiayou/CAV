@@ -30,18 +30,20 @@ PY
 
 4) 嵌入自包含认证
 ```bash
-python embed_auth_b.py \
-  --ckpt runs/cifar10_resnet20/best.pt \
-  --out runs/cifar10_resnet20/with_auth.pt \
-  --key_hex <YOUR_KEY_HEX> \
+python embed_auth_b.py `
+  --ckpt D:\learning_lizhihao\experiment\CAV-MerkleAuth\checkpoints\best_resnet18_cifar10_r18_c10.pth `
+  --out D:\learning_lizhihao\experiment\CAV-MerkleAuth\checkpoints\best_resnet18_cifar10_r18_c10_auth.pth `
+  --model resnet18_cifar --num_classes 10 --in_ch 3 `
+  --key_hex 702703ef42d1eb5936069c4cda1e61424aacd24ce82f34e252cd789bef04ad5e `
   --device cpu
 ```
 
 5) 验证（PASS/FAIL）
 ```bash
-python verify_auth_b.py \
-  --ckpt runs/cifar10_resnet20/with_auth.pt \
-  --key_hex <YOUR_KEY_HEX> \
+python verify_auth_b.py `
+  --ckpt D:\learning_lizhihao\experiment\CAV-MerkleAuth\checkpoints\best_resnet18_cifar10_r18_c10_auth.pth `
+  --model resnet18_cifar --num_classes 10 --in_ch 3 `
+  --key_hex 702703ef42d1eb5936069c4cda1e61424aacd24ce82f34e252cd789bef04ad5e `
   --device cpu
 ```
 
@@ -78,6 +80,7 @@ python verify_auth_b.py \
 - `--probe_n`、`--probe_h`、`--probe_w`
 - `--top_m`、`--sv_k`、`--quant_scale`
 - `--device cpu`（建议固定 CPU 以确保确定性）
+- 当 checkpoint 不包含 `cfg` 时，需要显式提供 `--model --num_classes --in_ch`（例如 CIFAR10 的 ResNet18 用 `--model resnet18_cifar --num_classes 10 --in_ch 3`）
 
 ## 工程结构
 

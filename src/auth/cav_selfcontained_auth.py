@@ -281,8 +281,8 @@ class CAVSelfContainedAuth:
     ) -> int:
         arrays = []
         for _name, tensor in carriers:
-            arr = tensor.detach().cpu().contiguous().view(torch.uint8).numpy()
-            u32 = arr.view(np.uint32)
+            arr = tensor.detach().cpu().contiguous().numpy()
+            u32 = arr.view(np.uint32).ravel()
             arrays.append((arr, u32))
         m = min(len(bits), len(mapping))
         for i in range(m):
@@ -293,8 +293,7 @@ class CAVSelfContainedAuth:
                 u32[off] |= mask
             else:
                 u32[off] &= ~mask
-        for (_name, tensor), (arr, u32) in zip(carriers, arrays):
-            arr[:] = u32.view(np.uint8)
+        for (_name, tensor), (arr, _u32) in zip(carriers, arrays):
             tensor.data.copy_(torch.from_numpy(arr).view_as(tensor))
         return m
 
@@ -306,8 +305,8 @@ class CAVSelfContainedAuth:
     ) -> List[int]:
         arrays = []
         for _name, tensor in carriers:
-            arr = tensor.detach().cpu().contiguous().view(torch.uint8).numpy()
-            u32 = arr.view(np.uint32)
+            arr = tensor.detach().cpu().contiguous().numpy()
+            u32 = arr.view(np.uint32).ravel()
             arrays.append(u32)
         m = min(nbits, len(mapping))
         out = []
