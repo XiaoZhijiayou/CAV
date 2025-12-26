@@ -7,7 +7,10 @@ import torch
 
 from src.utils.ckpt import load_checkpoint
 from src.utils.crypto import load_key_bytes
-from src.models.build import build_model
+try:
+    from models.build import build_model
+except ImportError:
+    from src.models.build import build_model
 from src.auth.cav_selfcontained_auth import SCConfig, CAVSelfContainedAuth
 
 
@@ -81,12 +84,21 @@ def main():
     )
     auth = CAVSelfContainedAuth(scfg)
     info = auth.embed_inplace(model, in_ch=in_ch)
+    _root_loc, module_ids, leaf_map = auth.compute_root_and_leaves(model, in_ch=in_ch)
+    _param_ids, param_map = auth.compute_param_hashes(model)
+    cav_loc = {
+        "version": 2,
+        "module_ids": module_ids,
+        "leaf_hex": [leaf_map[mid].hex() for mid in module_ids],
+        "param_hex": [param_map.get(mid, b"").hex() for mid in module_ids],
+    }
 
     out_path = Path(args.out)
     out_path.parent.mkdir(parents=True, exist_ok=True)
     torch.save({
         "model_state": model.state_dict(),
         "cfg": cfg,
+        "cav_loc": cav_loc,
     }, str(out_path))
 
     logger.info("embedded: root_hex=%s", info["root_hex"])

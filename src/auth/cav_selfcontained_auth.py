@@ -51,7 +51,12 @@ class CAVSelfContainedAuth:
         module_ids = sorted(groups.keys())
         return module_ids, groups
 
-    def _param_commitment(self, module_id: str, entries: List[Tuple[str, torch.Tensor]]) -> bytes:
+    def _param_commitment(
+        self,
+        module_id: str,
+        entries: List[Tuple[str, torch.Tensor]],
+        carrier_names: set[str] | None = None,
+    ) -> bytes:
         h = hashlib.sha256()
         h.update(self.cfg.key)
         h.update(b"|PARAM|")
@@ -61,7 +66,14 @@ class CAVSelfContainedAuth:
             name_b = name.encode("utf-8")
             dtype_b = str(t.dtype).encode("utf-8")
             shape_b = np.array(t.shape, dtype="<i8").tobytes()
-            data_b = t.numpy().tobytes()
+            if carrier_names and name in carrier_names and t.dtype == torch.float32 and self.cfg.lsb_bits > 0:
+                arr = t.numpy()
+                u32 = arr.view(np.uint32)
+                low_mask = np.uint32((1 << self.cfg.lsb_bits) - 1)
+                mask = np.uint32(0xFFFFFFFF) ^ low_mask
+                data_b = np.bitwise_and(u32, mask).tobytes()
+            else:
+                data_b = t.numpy().tobytes()
             h.update(b"|")
             h.update(name_b)
             h.update(b"\0")
@@ -170,18 +182,34 @@ class CAVSelfContainedAuth:
             level = nxt
         return level[0]
 
-    def compute_root(self, model: nn.Module, in_ch: int) -> bytes:
+    def compute_root_and_leaves(self, model: nn.Module, in_ch: int) -> Tuple[bytes, List[str], Dict[str, bytes]]:
         module_ids, groups = self._module_groups(model)
+        carrier_names = {name for name, _tensor in self._select_carriers(model)}
         cav_layers = [n for n, m in model.named_modules() if isinstance(m, (nn.Conv2d, nn.Linear))]
         cav_hashes = self._cav_hashes(model, cav_layers, in_ch=in_ch)
         leaves: List[bytes] = []
+        leaf_map: Dict[str, bytes] = {}
         for module_id in module_ids:
-            h_param = self._param_commitment(module_id, groups[module_id])
+            h_param = self._param_commitment(module_id, groups[module_id], carrier_names=carrier_names)
             h_cav = cav_hashes.get(module_id)
             if h_cav is None:
                 h_cav = sha256(self.cfg.key + b"|CAV|EMPTY|" + module_id.encode("utf-8"))
-            leaves.append(self._leaf_hash(module_id, h_param, h_cav))
-        return self._merkle_root(leaves)
+            leaf = self._leaf_hash(module_id, h_param, h_cav)
+            leaves.append(leaf)
+            leaf_map[module_id] = leaf
+        return self._merkle_root(leaves), module_ids, leaf_map
+
+    def compute_param_hashes(self, model: nn.Module) -> Tuple[List[str], Dict[str, bytes]]:
+        module_ids, groups = self._module_groups(model)
+        carrier_names = {name for name, _tensor in self._select_carriers(model)}
+        out: Dict[str, bytes] = {}
+        for module_id in module_ids:
+            out[module_id] = self._param_commitment(module_id, groups[module_id], carrier_names=carrier_names)
+        return module_ids, out
+
+    def compute_root(self, model: nn.Module, in_ch: int) -> bytes:
+        root, _module_ids, _leaf_map = self.compute_root_and_leaves(model, in_ch=in_ch)
+        return root
 
     def pack_payload(self, root: bytes, in_ch: int) -> bytes:
         C, H, W = self.cfg.probe_shape
@@ -288,11 +316,11 @@ class CAVSelfContainedAuth:
         for i in range(m):
             pi, off, bi = mapping[i]
             u32 = arrays[pi][1]
-            mask = 1 << bi
+            mask = np.uint32(1) << np.uint32(bi)
             if bits[i] == 1:
                 u32[off] |= mask
             else:
-                u32[off] &= ~mask
+                u32[off] &= np.uint32(~mask)
         for (_name, tensor), (arr, _u32) in zip(carriers, arrays):
             tensor.data.copy_(torch.from_numpy(arr).view_as(tensor))
         return m
