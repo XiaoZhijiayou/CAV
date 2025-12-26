@@ -100,7 +100,7 @@ class CAVSelfContainedAuth:
                 raise RuntimeError(f"No grad for layer {lname}. Is it used in forward?")
 
             if isinstance(layer, nn.Conv2d):
-                score = gW.detach().abs().mean(dim=(1, 2, 3))
+                score = gW.detach().abs().mean(dim=[2, 3]).mean(dim=1)
                 out_c = W.size(0)
             else:
                 score = gW.detach().abs().mean(dim=1)
